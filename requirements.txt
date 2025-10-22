@@ -1,0 +1,39 @@
+# FastAPI and ASGI server
+fastapi
+uvicorn[standard]
+
+# Sentence embeddings
+sentence-transformers
+torch
+
+# FAISS for vector similarity
+faiss-cpu
+
+# OpenTelemetry core
+opentelemetry-api
+opentelemetry-sdk
+
+# OpenTelemetry instrumentation
+opentelemetry-instrumentation
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-logging
+
+# OTLP exporter (Jaeger, Tempo, etc.)
+opentelemetry-exporter-otlp
+
+# Prometheus metrics
+prometheus-client
+prometheus-fastapi-instrumentator
+
+# Settings and environment
+pydantic-settings
+python-dotenv
+
+# Optional: For using OpenAI API
+openai
+
+# Optional: If using Jaeger directly (CLI viewing)
+opentelemetry-exporter-jaeger
+
+# Optional: Rich trace printing for debug
+rich
