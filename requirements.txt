@@ -37,3 +37,13 @@ opentelemetry-exporter-jaeger
 
 # Optional: Rich trace printing for debug
 rich
+
+# Runtime dependencies used by the codebase
+requests
+python-keycloak
+python-jose
+matplotlib
+psutil
+
+# Evaluation
+deepeval

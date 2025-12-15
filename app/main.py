@@ -1,247 +1,304 @@
-from fastapi import FastAPI, Depends, Form, HTTPException, Request, status, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel
-from keycloak import KeycloakOpenID, KeycloakAuthenticationError
-from dotenv import load_dotenv
-from opentelemetry import trace
-from datetime import datetime
+"""
+Application Entry Point.
+
+FastAPI application with modular architecture.
+"""
+
 import logging
-import uuid
 import os
+from contextlib import asynccontextmanager
 
-# Import routers
-from app.routes.llm_routes import router as llm_router
-from app.routes.observability_routes import router as observability_router
-from app.rag_pipeline import generate_response
-from observe import setup_observability
-from observe.instrumentation import instrument_all_in_package
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-# ============================================================
-# === Load environment variables ===
-# ============================================================
+# Load environment variables first
 load_dotenv()
 
-KEYCLOAK_SERVER_URL = os.getenv("KEYCLOAK_SERVER_URL")
-REALM_NAME = os.getenv("REALM_NAME")
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET_KEY = os.getenv("CLIENT_SECRET_KEY")
-CALLBACK_URI = os.getenv("CALLBACK_URI", "http://localhost:8000/callback")
+# Import core configuration
+from app.core import settings, AppError
+
+# Import observability (sets up tracing before other imports)
+from app.observability import (
+    setup_observability,
+    RequestContextManager,
+    get_log_buffer,
+)
+
+# Import auth
+from app.auth import (
+    TenantMiddleware,
+    auth_settings,
+)
+
+# Import API routers
+from app.api import v1_router
+
+# Import RAG for startup warmup
+from app.rag import reindex, get_embedding_service
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
 
 # ============================================================
-# === Initialize FastAPI App ===
+# === Application Lifespan ===
 # ============================================================
-app = FastAPI(title="RAG Observability Demo")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan handler.
+    
+    Startup:
+    - Warm up embedding model
+    - Build/load vector index
+    
+    Shutdown:
+    - Cleanup resources
+    """
+    # Startup
+    logger.info("Starting application...")
+    
+    try:
+        # Warm up embedding model
+        logger.info("Warming up embedding model...")
+        embedding_service = get_embedding_service()
+        _ = embedding_service.dimension  # Force model load
+        logger.info(f"Embedding model loaded: {embedding_service.model_name}")
+        
+        # Build/load index
+        logger.info("Loading vector index...")
+        result = reindex()
+        logger.info(f"Index ready: {result['documents']} documents, dim={result['dim']}")
+        
+    except Exception as e:
+        logger.warning(f"Startup warmup failed (non-fatal): {e}")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down application...")
 
+
+# ============================================================
+# === Create FastAPI Application ===
+# ============================================================
+app = FastAPI(
+    title=settings.api_title,
+    description="""
+## RAG Observability Demo API
+
+A production-ready RAG (Retrieval-Augmented Generation) API with comprehensive observability.
+
+### Features
+
+- **RAG Pipeline**: Query travel data with semantic search and LLM generation
+- **Authentication**: Keycloak-based OAuth2/OIDC authentication
+- **Observability**: OpenTelemetry tracing, Prometheus metrics, structured logging
+- **Multi-tenancy**: Tenant isolation for all data and telemetry
+
+### Modules
+
+- `/api/v1/auth` - Authentication endpoints
+- `/api/v1/rag` - RAG query endpoints
+- `/api/v1/observability` - Traces and logs access
+    """,
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    lifespan=lifespan,
+)
+
+
+# ============================================================
+# === Middleware ===
+# ============================================================
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Tenant/Auth middleware
+app.add_middleware(TenantMiddleware)
+
+
 # ============================================================
-# === Observability Setup ===
+# === Exception Handlers ===
+# ============================================================
+@app.exception_handler(AppError)
+async def app_error_handler(request: Request, exc: AppError):
+    """Handle application errors."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_dict(),
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected errors."""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "INTERNAL_ERROR",
+            "message": "An unexpected error occurred",
+        },
+    )
+
+
+# ============================================================
+# === Setup Observability ===
 # ============================================================
 setup_observability(app)
-instrument_all_in_package(os.path.join(os.path.dirname(__file__), ""), "app")
+
 
 # ============================================================
-# === Keycloak Setup ===
+# === Include Routers ===
 # ============================================================
-keycloak_openid = KeycloakOpenID(
-    server_url=KEYCLOAK_SERVER_URL,
-    realm_name=REALM_NAME,
-    client_id=CLIENT_ID,
-    client_secret_key=CLIENT_SECRET_KEY
-)
+app.include_router(v1_router)
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 # ============================================================
-# === MODELS ===
+# === Root Endpoints ===
 # ============================================================
+@app.get("/", tags=["root"])
+async def root():
+    """Root endpoint with API info."""
+    return {
+        "name": settings.service_name,
+        "version": "2.0.0",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
+@app.get("/health", tags=["health"])
+async def health_check():
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "service": settings.service_name,
+    }
+
+
+# ============================================================
+# === Legacy Compatibility Endpoints ===
+# ============================================================
+# These endpoints maintain backwards compatibility with existing clients
+
+from fastapi import Depends, Form, HTTPException, Query
+from app.auth import get_current_user, auth_service, UserIdentity
+from app.rag import get_rag_pipeline
+from app.api.v1.endpoints.rag import format_results_as_json, format_as_fenced_json
+from pydantic import BaseModel
+import json
+
+
 class QueryRequest(BaseModel):
+    """Legacy query request."""
     query: str
 
 
-class LogEntry(BaseModel):
-    id: str
-    timestamp: str
-    level: str
-    service: str
-    tenant_id: str
-    message: str
-    metadata: dict | None = None
-
-
-# ============================================================
-# === In-Memory Log Storage ===
-# ============================================================
-log_buffer: list[LogEntry] = []
-
-
-class InMemoryLogHandler(logging.Handler):
-    """
-    Custom log handler that stores logs in memory with tenant/user metadata.
-    """
-    def emit(self, record: logging.LogRecord):
-        try:
-            log_entry = LogEntry(
-                id=str(uuid.uuid4()),
-                timestamp=datetime.utcnow().isoformat() + "Z",
-                level=record.levelname,
-                service="backend",
-                tenant_id=getattr(record, "tenant_id", "anonymous"),
-                message=record.getMessage(),
-                metadata={
-                    "filename": record.pathname,
-                    "line": record.lineno,
-                    "function": record.funcName,
-                    "exception": getattr(record, "exc_text", None),
-                },
-            )
-            log_buffer.append(log_entry)
-            if len(log_buffer) > 500:  # limit history
-                log_buffer.pop(0)
-        except Exception:
-            pass
-
-
-# Setup logger
-logger = logging.getLogger("backend")
-logger.setLevel(logging.DEBUG)
-logger.addHandler(InMemoryLogHandler())
-logger.propagate = True
-
-# ============================================================
-# === TOKEN VALIDATION DEPENDENCY ===
-# ============================================================
-def get_current_user(token: str = Depends(oauth2_scheme)):
-    """
-    Validate JWT token and return Keycloak user info.
-    """
+@app.post("/login", tags=["legacy"])
+async def legacy_login(
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    """Legacy login endpoint."""
     try:
-        user_info = keycloak_openid.userinfo(token)
-        return user_info
+        token_info = await auth_service.login(username, password)
+        return token_info.to_dict()
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token: {str(e)}",
-        )
+        logger.warning(f"Login failed for {username}: {e}")
+        raise HTTPException(status_code=401, detail="Authentication failed")
 
-# ============================================================
-# === TENANT TELEMETRY + LOGGING MIDDLEWARE ===
-# ============================================================
-@app.middleware("http")
-async def tenant_telemetry_middleware(request: Request, call_next):
+
+@app.post("/query", tags=["legacy"])
+async def legacy_query(
+    request: Request,
+    query_data: QueryRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
     """
-    Middleware:
-      - Extract tenant (username) from Keycloak token
-      - Tag logs and traces with tenant info
-      - Capture request/response lifecycle
-    """
-    tracer = trace.get_tracer(__name__)
-    tenant_id = "anonymous"
-    username = "guest"
-
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split("Bearer ")[1]
-        try:
-            user_info = keycloak_openid.userinfo(token)
-            username = user_info.get("preferred_username", "guest")
-            tenant_id = username
-        except Exception:
-            pass
-
-    request.state.tenant_id = tenant_id
-    request.state.username = username
-
-    logger.info(f"Incoming request {request.method} {request.url.path}", extra={"tenant_id": tenant_id})
-
-    try:
-        response = await call_next(request)
-        logger.info(
-            f"Completed request {request.method} {request.url.path} with status {response.status_code}",
-            extra={"tenant_id": tenant_id}
-        )
-        return response
-    except Exception as exc:
-        logger.error(
-            f"Unhandled error in {request.url.path}: {exc}",
-            exc_info=True,
-            extra={"tenant_id": tenant_id}
-        )
-        raise
-
-# ============================================================
-# === LOGIN ENDPOINT ===
-# ============================================================
-@app.post("/login")
-async def login(username: str = Form(...), password: str = Form(...)):
-    """
-    Log in to Keycloak using username/password (Direct Access Grant).
-    Returns access_token and refresh_token.
+    Legacy query endpoint.
+    
+    Returns response in format expected by frontend:
+    - answer: fenced JSON with results array
+    - results: direct results array
     """
     try:
-        token = keycloak_openid.token(username, password)
-        logger.info(f"User {username} logged in successfully", extra={"tenant_id": username})
-        return token
-    except KeycloakAuthenticationError as e:
-        logger.warning(f"Failed login attempt for {username}", extra={"tenant_id": username})
-        raise HTTPException(status_code=401, detail=f"Invalid credentials: {e.response_body}")
+        pipeline = get_rag_pipeline()
+        response = pipeline.query(
+            question=query_data.query,
+            tenant_id=user.tenant_id,
+        )
+        
+        # Format results for frontend
+        results = format_results_as_json(response.retrieved_docs)
+        answer = format_as_fenced_json(results)
+        
+        return {
+            "answer": answer,
+            "results": results,
+            "reasoning": response.generation_result.reasoning_trace if response.generation_result else [],
+            "query_result": {
+                "tenant_id": user.tenant_id,
+                "query": query_data.query,
+                "retrieved_count": len(response.retrieved_docs),
+            },
+        }
+    except Exception as e:
+        logger.error(f"Query failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Query processing failed")
 
-# ============================================================
-# === QUERY ENDPOINT (PROTECTED) ===
-# ============================================================
-@app.post("/query")
-async def handle_query(request: Request, query_data: QueryRequest, user=Depends(get_current_user)):
-    """
-    Query endpoint that generates an LLM response.
-    Uses the Keycloak username as tenant_id automatically.
-    """
-    tenant_id = getattr(request.state, "tenant_id", "anonymous")
-    try:
-        logger.info(f"Processing query for tenant {tenant_id}", extra={"tenant_id": tenant_id})
-        response = generate_response(query_data.query, tenant_id)
-        logger.info(f"Response generated for tenant {tenant_id}", extra={"tenant_id": tenant_id})
-        return {"tenant": tenant_id, "response": response}
-    except Exception as exc:
-        logger.error(f"Error while generating response: {exc}", exc_info=True, extra={"tenant_id": tenant_id})
-        raise HTTPException(status_code=500, detail="Internal Server Error")
 
-# ============================================================
-# === LOGS ENDPOINT ===
-# ============================================================
-@app.get("/logs")
-async def get_logs(level: str = Query(None, description="Filter logs by level: info, warning, error")):
-    """
-    Return live in-memory logs.
-    Optional filter: ?level=info|warning|error
-    """
-    if level:
-        filtered = [log for log in log_buffer if log.level.lower() == level.lower()]
-        return sorted(filtered, key=lambda x: x.timestamp, reverse=True)
-    return sorted(log_buffer, key=lambda x: x.timestamp, reverse=True)
+@app.get("/logs", tags=["legacy"])
+async def legacy_logs(
+    level: str = Query(None),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Legacy logs endpoint."""
+    logs = get_log_buffer(
+        level=level,
+        tenant_id=None if user.is_admin else user.tenant_id,
+    )
+    return sorted(
+        [log.to_dict() for log in logs],
+        key=lambda x: x.get("timestamp", ""),
+        reverse=True,
+    )
 
-# ============================================================
-# === AUTH DEBUG (OPTIONAL) ===
-# ============================================================
-@app.get("/auth/debug")
-async def auth_debug(request: Request, user=Depends(get_current_user)):
-    """
-    Returns user info decoded from access token, including tenant_id.
-    """
+
+@app.get("/auth/debug", tags=["legacy"])
+async def legacy_auth_debug(
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Legacy auth debug endpoint."""
     return {
-        "username": getattr(request.state, "username", "guest"),
-        "tenant_id": getattr(request.state, "tenant_id", "anonymous"),
-        "keycloak_userinfo": user
+        "username": user.username,
+        "tenant_id": user.tenant_id,
+        "roles": user.roles,
+        "role_group": user.role_group.value,
     }
 
+
 # ============================================================
-# === INCLUDE ROUTERS ===
+# === Main Entry Point ===
 # ============================================================
-app.include_router(llm_router)
-app.include_router(observability_router)
+if __name__ == "__main__":
+    import uvicorn
+    
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+    )

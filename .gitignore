@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Environment
+.env
+.env.local
+
+# Data
+data/
+documents/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Results
+Results/
+
+# DeepEval
+.deepeval/
+
+# FAISS indices
+*.index
+*.faiss
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
