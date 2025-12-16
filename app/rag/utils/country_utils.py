@@ -28,9 +28,8 @@ def _load_country_aliases() -> Dict[str, str]:
         return _ALIASES_CACHE
     
     try:
-        # Find the aliases file
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        path = os.path.join(base_dir, "data", "country_aliases.json")
+        # Find the aliases file (in the same directory as this module)
+        path = os.path.join(os.path.dirname(__file__), "country_aliases.json")
         
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)

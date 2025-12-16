@@ -18,6 +18,7 @@ from app.observability import (
     clear_spans,
     clear_log_buffer,
 )
+from app.feedback import get_feedback_store
 from app.observability.metrics import (
     get_function_metrics,
     get_llm_metrics,
@@ -119,6 +120,9 @@ async def get_traces(
     span_depth = settings.trace_span_depth.lower()
     enabled_categories = settings.enabled_telemetry_categories
     
+    # Get feedback store for enriching traces with feedback data
+    feedback_store = get_feedback_store()
+    
     # Build hierarchical traces
     traces = []
     for trace_id in selected_trace_ids:
@@ -155,6 +159,12 @@ async def get_traces(
                 allowed_prefixes,
                 enabled_categories
             )
+            
+            # Enrich with feedback data if conversation_id exists
+            conversation_id = span.attributes.get("conversation_id") or span.attributes.get("rag.conversation_id")
+            if conversation_id:
+                feedback_attrs = feedback_store.get_feedback_attributes_for_conversation(conversation_id)
+                filtered_attrs.update(feedback_attrs)
             
             span_dict = {
                 "trace_id": span.trace_id,

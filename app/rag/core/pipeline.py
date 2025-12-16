@@ -77,6 +77,7 @@ class RAGPipeline:
         tenant_id: str = "anonymous",
         top_k: int = None,
         model: str = None,
+        conversation_id: str = None,
     ) -> RAGResponse:
         """
         Execute the complete RAG pipeline.
@@ -86,6 +87,7 @@ class RAGPipeline:
             tenant_id: Tenant identifier
             top_k: Number of documents to retrieve
             model: LLM model to use
+            conversation_id: Conversation ID for feedback tracking
             
         Returns:
             RAGResponse with answer and metadata
@@ -95,6 +97,13 @@ class RAGPipeline:
         span = get_current_span()
         span.set_attribute("rag.query", question)
         span.set_attribute("rag.tenant_id", tenant_id)
+        
+        # Set conversation_id and feedback attributes on this span
+        if conversation_id:
+            span.set_attribute("conversation_id", conversation_id)
+            span.set_attribute("rag.conversation_id", conversation_id)
+        span.set_attribute("feedback.status", "not_given")
+        span.set_attribute("feedback.rating", "pending")
         
         # Step 1: Parse query terms
         query_terms = self._parse_query(question, tenant_id)
@@ -126,6 +135,7 @@ class RAGPipeline:
             model=model,
             user_question=question,
             context_texts=context_texts,
+            conversation_id=conversation_id,
         )
         
         return RAGResponse(
@@ -185,6 +195,9 @@ class RAGPipeline:
         if query_terms.provider:
             results = self._filter_by_provider(results, query_terms.provider)
         
+        if query_terms.airport:
+            results = self._filter_by_airport(results, query_terms.airport)
+        
         # Apply sorting
         if query_terms.sort_by == SortOrder.PRICE:
             results = self._sort_by_price(results)
@@ -199,11 +212,19 @@ class RAGPipeline:
         countries: List[str],
     ) -> List[RetrievalResult]:
         """Filter results by country."""
-        countries_lower = [c.lower() for c in countries]
-        return [
+        from ..utils.country_utils import normalize_country
+        
+        # Normalize the filter countries
+        normalized_filters = [normalize_country(c).lower() for c in countries]
+        
+        filtered = [
             r for r in results
-            if r.metadata.country and r.metadata.country.lower() in countries_lower
+            if r.metadata.country and normalize_country(r.metadata.country).lower() in normalized_filters
         ]
+        
+        # If strict filtering returns results, use them; otherwise return original
+        # This ensures we don't return empty results when country detection works
+        return filtered if filtered else results
     
     def _filter_by_provider(
         self,
@@ -216,6 +237,33 @@ class RAGPipeline:
             r for r in results
             if r.metadata.provider and provider_lower in r.metadata.provider.lower()
         ]
+    
+    def _filter_by_airport(
+        self,
+        results: List[RetrievalResult],
+        airport: str,
+    ) -> List[RetrievalResult]:
+        """Filter results by departure airport."""
+        airport_lower = airport.lower()
+        
+        filtered = []
+        for r in results:
+            # Check date_summary for airport info
+            summary = r.metadata.date_summary or ""
+            for part in summary.split(";"):
+                if "|" in part:
+                    try:
+                        parts = part.split("|")
+                        if len(parts) >= 3:
+                            airport_part = parts[2].strip().lower()
+                            if airport_lower in airport_part:
+                                filtered.append(r)
+                                break
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Return filtered if we found matches, otherwise return original
+        return filtered if filtered else results
     
     def _sort_by_price(
         self,

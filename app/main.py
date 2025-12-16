@@ -197,7 +197,7 @@ async def health_check():
 from fastapi import Depends, Form, HTTPException, Query
 from app.auth import get_current_user, auth_service, UserIdentity
 from app.rag import get_rag_pipeline
-from app.api.v1.endpoints.rag import format_results_as_json, format_as_fenced_json
+from app.api.v1.endpoints.rag import format_results_as_json, format_as_fenced_json, generate_text_explanation
 from pydantic import BaseModel
 import json
 
@@ -244,8 +244,15 @@ async def legacy_query(
         # Format results for frontend
         results = format_results_as_json(response.retrieved_docs)
         answer = format_as_fenced_json(results)
+        text_explanation = generate_text_explanation(query_data.query, results)
+        
+        # Generate conversation ID for feedback tracking
+        import uuid
+        conversation_id = str(uuid.uuid4())
         
         return {
+            "conversation_id": conversation_id,
+            "text_explanation": text_explanation,
             "answer": answer,
             "results": results,
             "reasoning": response.generation_result.reasoning_trace if response.generation_result else [],

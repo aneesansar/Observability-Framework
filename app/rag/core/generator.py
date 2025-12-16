@@ -88,6 +88,7 @@ class LLMGenerator:
         model: str = None,
         user_question: str = None,
         context_texts: List[str] = None,
+        conversation_id: str = None,
     ) -> GenerationResult:
         """
         Generate a response using the LLM.
@@ -98,6 +99,7 @@ class LLMGenerator:
             model: LLM model to use
             user_question: Original user question
             context_texts: Retrieved context texts
+            conversation_id: Conversation ID for feedback tracking
             
         Returns:
             GenerationResult with answer and metadata
@@ -109,7 +111,7 @@ class LLMGenerator:
         start_time = time.time()
         
         # Set basic span attributes
-        self._set_span_attributes(span, tenant_id, model, prompt)
+        self._set_span_attributes(span, tenant_id, model, prompt, conversation_id)
         
         try:
             # Build system prompt
@@ -307,12 +309,22 @@ User query: {user_prompt}
         tenant_id: str,
         model: str,
         prompt: str,
+        conversation_id: str = None,
     ) -> None:
         """Set basic span attributes."""
         span.set_attribute(SpanAttributes.TENANT_ID, tenant_id)
         span.set_attribute("function", "generate_response")
         span.set_attribute("generate_response.model", model)
         span.set_attribute("generate_response.prompt_present", True)
+        
+        # Set conversation_id for feedback tracking
+        if conversation_id:
+            span.set_attribute("conversation_id", conversation_id)
+            span.set_attribute("rag.conversation_id", conversation_id)
+        
+        # Set default feedback status (will be updated when feedback is given)
+        span.set_attribute("feedback.status", "not_given")
+        span.set_attribute("feedback.rating", "pending")
     
     def _record_llm_metrics(
         self,

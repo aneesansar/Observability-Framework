@@ -6,6 +6,7 @@ Query and retrieval endpoints for the RAG pipeline.
 
 import json
 import logging
+import uuid
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import get_current_user, UserIdentity
 from app.rag import get_rag_pipeline, reindex
+from app.observability import get_current_span
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +77,15 @@ class RAGQueryResponse(BaseModel):
     Supports two formats:
     1. answer contains fenced JSON with results array
     2. results array directly at root level
+    
+    Also includes a natural language text_explanation for chat-style responses.
     """
+    
+    # Conversation ID for feedback tracking
+    conversation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    
+    # Natural language explanation of the results
+    text_explanation: Optional[str] = None
     
     # Option 1: Answer as fenced JSON string
     answer: Optional[str] = None
@@ -200,6 +210,116 @@ def format_as_fenced_json(results: List[Dict[str, Any]]) -> str:
     return f"```json\n{json_str}\n```"
 
 
+def generate_text_explanation(query: str, results: List[Dict[str, Any]]) -> str:
+    """
+    Generate a natural language explanation of the trip results.
+    
+    Args:
+        query: The user's original query
+        results: List of trip result dictionaries
+        
+    Returns:
+        Natural language explanation string (plain text, no markdown)
+    """
+    if not results:
+        return "I couldn't find any trips matching your search criteria. Please try adjusting your query or filters."
+    
+    count = len(results)
+    
+    # Find earliest trip and cheapest trip for comparison
+    earliest_trip = None
+    earliest_date = None
+    cheapest_trip = None
+    cheapest_price = float('inf')
+    
+    for trip in results:
+        schedules = trip.get("schedules", [])
+        for sched in schedules:
+            # Check for earliest date
+            start_date = sched.get("start")
+            if start_date and (earliest_date is None or start_date < earliest_date):
+                earliest_date = start_date
+                earliest_trip = trip
+            
+            # Check for cheapest price
+            price_str = sched.get("price")
+            if price_str:
+                try:
+                    price = float(str(price_str).replace(",", "."))
+                    if price < cheapest_price:
+                        cheapest_price = price
+                        cheapest_trip = trip
+                except (ValueError, TypeError):
+                    pass
+    
+    # Build plain text response
+    parts = []
+    
+    # Opening
+    parts.append(f"I have found {count} trip{'s' if count > 1 else ''} matching your search.")
+    
+    # Add comparison metrics
+    if earliest_trip and earliest_date:
+        parts.append(f"The earliest starting trip is on {earliest_date} by {earliest_trip.get('provider', 'Unknown')} - \"{earliest_trip.get('title', 'Unknown Trip')}\".")
+    
+    if cheapest_trip and cheapest_price < float('inf'):
+        # Find the schedule with the cheapest price
+        cheapest_start = None
+        for sched in cheapest_trip.get("schedules", []):
+            price_str = sched.get("price")
+            if price_str:
+                try:
+                    price = float(str(price_str).replace(",", "."))
+                    if price == cheapest_price:
+                        cheapest_start = sched.get("start")
+                        break
+                except (ValueError, TypeError):
+                    pass
+        
+        price_display = f"€{cheapest_price:.0f}" if cheapest_price == int(cheapest_price) else f"€{cheapest_price:.2f}"
+        cheapest_info = f"The trip with the lowest price is \"{cheapest_trip.get('title', 'Unknown Trip')}\" at {price_display}"
+        if cheapest_start:
+            cheapest_info += f" starting on {cheapest_start}"
+        cheapest_info += "."
+        parts.append(cheapest_info)
+    
+    # List the trips
+    parts.append("")
+    parts.append("Here are the trips:")
+    
+    for i, trip in enumerate(results, 1):
+        title = trip.get("title") or "Unnamed Trip"
+        country = trip.get("country") or "Unknown destination"
+        duration = trip.get("duration")
+        provider = trip.get("provider")
+        schedules = trip.get("schedules", [])
+        
+        trip_info = f"{i}. {title} ({country})"
+        if duration:
+            trip_info += f" - {duration} days"
+        if provider:
+            trip_info += f" by {provider}"
+        
+        # Add first available schedule
+        if schedules:
+            first_sched = schedules[0]
+            start = first_sched.get("start", "")
+            price = first_sched.get("price", "")
+            if start and price:
+                trip_info += f". Starting {start} from €{price}"
+            elif start:
+                trip_info += f". Starting {start}"
+            elif price:
+                trip_info += f". From €{price}"
+        
+        parts.append(trip_info)
+    
+    parts.append("")
+    parts.append("Would you like more details about any of these trips, or would you like me to refine the search?")
+    
+    return " ".join(parts)
+
+
 # ============================================================
 # === Endpoints ===
 # ============================================================
@@ -215,16 +335,31 @@ async def query_rag(
     
     Retrieves relevant documents and generates an answer.
     
-    Response format supports:
-    1. `answer` field with fenced JSON containing results
-    2. `results` array directly at root level
+    Response format includes:
+    - `text_explanation`: Natural language chat-style explanation of the results
+    - `answer`: Fenced JSON containing results (for backward compatibility)
+    - `results`: Structured array of trip results
     """
     tenant_id = user.tenant_id
     
+    # Generate conversation ID early for feedback tracking across all spans
+    conversation_id = str(uuid.uuid4())
+    
     try:
+        # Set conversation_id on the current span immediately
+        try:
+            span = get_current_span()
+            if span:
+                span.set_attribute("conversation_id", conversation_id)
+                span.set_attribute("rag.conversation_id", conversation_id)
+                span.set_attribute("feedback.status", "not_given")
+                span.set_attribute("feedback.rating", "pending")
+        except Exception as e:
+            logger.debug(f"Could not set initial span attributes: {e}")
+        
         logger.info(
             f"Processing RAG query for tenant {tenant_id}",
-            extra={"tenant_id": tenant_id}
+            extra={"tenant_id": tenant_id, "conversation_id": conversation_id}
         )
         
         pipeline = get_rag_pipeline()
@@ -232,6 +367,7 @@ async def query_rag(
             question=body.query,
             tenant_id=tenant_id,
             top_k=body.top_k,
+            conversation_id=conversation_id,  # Pass conversation_id to pipeline
         )
         
         # Format retrieved docs as structured results
@@ -263,12 +399,17 @@ async def query_rag(
         if response.generation_result and hasattr(response.generation_result, 'reasoning_trace'):
             reasoning = response.generation_result.reasoning_trace or []
         
+        # Generate natural language explanation
+        text_explanation = generate_text_explanation(body.query, results)
+        
         logger.info(
             f"RAG query completed for tenant {tenant_id}: {len(results)} results",
-            extra={"tenant_id": tenant_id}
+            extra={"tenant_id": tenant_id, "conversation_id": conversation_id}
         )
         
         return RAGQueryResponse(
+            conversation_id=conversation_id,
+            text_explanation=text_explanation,
             answer=answer,
             results=[TripResult(**r) for r in results],
             reasoning=reasoning,
