@@ -24,10 +24,54 @@ from app.observability.metrics import (
     get_llm_metrics,
     get_rag_metrics,
 )
+from app.db.repositories import (
+    get_trace_repository,
+    get_feedback_repository,
+    get_evaluation_repository,
+    get_prompt_repository,
+)
+from app.core import get_resource_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# In-memory cache for system performance history (last 15 readings per tenant)
+_system_performance_history: Dict[str, Dict[str, List[Any]]] = {}
+MAX_HISTORY_POINTS = 15
+
+
+def _get_system_history(tenant_id: str) -> Dict[str, List[Any]]:
+    """Get or initialize system performance history for a tenant."""
+    if tenant_id not in _system_performance_history:
+        _system_performance_history[tenant_id] = {
+            "timestamps": [],
+            "cpu_usage": [],
+            "memory_usage": [],
+            "disk_io_mb": [],
+            "network_mb": [],
+        }
+    return _system_performance_history[tenant_id]
+
+
+def _add_system_reading(tenant_id: str, cpu: float, memory: float, disk_mb: float, network_mb: float) -> None:
+    """Add a system performance reading to history."""
+    from datetime import datetime
+    
+    history = _get_system_history(tenant_id)
+    timestamp = datetime.utcnow().strftime("%H:%M")
+    
+    # Add new readings
+    history["timestamps"].append(timestamp)
+    history["cpu_usage"].append(round(cpu, 1))
+    history["memory_usage"].append(round(memory, 1))
+    history["disk_io_mb"].append(round(disk_mb, 2))
+    history["network_mb"].append(round(network_mb, 2))
+    
+    # Keep only last MAX_HISTORY_POINTS
+    for key in history:
+        if len(history[key]) > MAX_HISTORY_POINTS:
+            history[key] = history[key][-MAX_HISTORY_POINTS:]
 
 
 @router.get("/traces")
@@ -36,6 +80,7 @@ async def get_traces(
     limit: int = Query(default=50, ge=1, le=500),
     window_seconds: int = Query(default=600, ge=0, description="Only include spans ending within the last N seconds (0 = no limit)"),
     max_spans: int = Query(default=5000, ge=100, le=20000, description="Cap the total spans considered before pagination"),
+    include_db: bool = Query(default=True, description="Include traces from MongoDB for persistence across restarts"),
     user: UserIdentity = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
@@ -43,6 +88,9 @@ async def get_traces(
     
     Returns traces grouped by trace_id with parent-child span relationships.
     Filtered by tenant_id for non-admin users.
+    
+    When include_db=True (default), also fetches persisted traces from MongoDB
+    to ensure traces are available after server restarts or user re-login.
     """
     from collections import defaultdict
     import time
@@ -67,8 +115,18 @@ async def get_traces(
             for keyword in EXCLUDED_PATH_KEYWORDS
         )
     
-    # Get all spans
+    # Get all spans from in-memory storage
     raw_spans = get_recent_spans(limit=max_spans * 10, tenant_id=None)
+    
+    # Also fetch from MongoDB if enabled for persistence across restarts
+    db_traces = []
+    if include_db:
+        try:
+            trace_repo = get_trace_repository()
+            db_traces = trace_repo.list_by_tenant(str(user.tenant_id), limit=limit * 2)
+            logger.info(f"Fetched {len(db_traces)} traces from MongoDB for tenant '{user.tenant_id}'")
+        except Exception as e:
+            logger.warning(f"Failed to fetch traces from MongoDB: {e}")
     
     # Apply time window filter
     if window_seconds and window_seconds > 0:
@@ -100,18 +158,6 @@ async def get_traces(
     for span in tenant_filtered:
         traces_dict[span.trace_id].append(span)
     
-    # Sort traces by most recent end time
-    trace_ids = sorted(
-        traces_dict.keys(),
-        key=lambda tid: max(s.end_time for s in traces_dict[tid]),
-        reverse=True,
-    )
-    
-    # Pagination
-    total = len(trace_ids)
-    start, end = (page - 1) * limit, (page - 1) * limit + limit
-    selected_trace_ids = trace_ids[start:end]
-    
     # Get allowed attribute prefixes for role
     allowed_prefixes = auth_service.get_allowed_attr_prefixes(user.role_group)
     
@@ -123,9 +169,11 @@ async def get_traces(
     # Get feedback store for enriching traces with feedback data
     feedback_store = get_feedback_store()
     
-    # Build hierarchical traces
+    # Build hierarchical traces from in-memory spans
+    in_memory_trace_ids = set(traces_dict.keys())
     traces = []
-    for trace_id in selected_trace_ids:
+    
+    for trace_id in traces_dict.keys():
         spans = traces_dict[trace_id]
         span_map = {}
         
@@ -176,6 +224,7 @@ async def get_traces(
                 "attributes": filtered_attrs,
                 "events": formatted_events,
                 "children": [],
+                "source": "memory",
             }
             span_map[span_dict["span_id"]] = span_dict
         
@@ -194,14 +243,92 @@ async def get_traces(
         traces.append({
             "trace_id": trace_id,
             "spans": filtered_roots,
+            "source": "memory",
         })
+    
+    # Add MongoDB traces that are not in memory (for persistence across restarts)
+    if db_traces:
+        for db_trace in db_traces:
+            # Skip if already in memory
+            if db_trace.trace_id in in_memory_trace_ids:
+                continue
+            
+            # Convert MongoDB trace to response format
+            db_spans = []
+            for span_data in db_trace.spans:
+                # Filter attributes
+                filtered_attrs = _filter_attributes_by_role_and_category(
+                    span_data.get("attributes", {}),
+                    allowed_prefixes,
+                    enabled_categories
+                )
+                
+                # Enrich with feedback data
+                conversation_id = span_data.get("attributes", {}).get("conversation_id") or \
+                                  span_data.get("attributes", {}).get("rag.conversation_id")
+                if conversation_id:
+                    feedback_attrs = feedback_store.get_feedback_attributes_for_conversation(conversation_id)
+                    filtered_attrs.update(feedback_attrs)
+                
+                db_spans.append({
+                    "trace_id": db_trace.trace_id,
+                    "span_id": span_data.get("span_id"),
+                    "parent_span_id": span_data.get("parent_span_id"),
+                    "name": span_data.get("name"),
+                    "kind": "INTERNAL",
+                    "status": span_data.get("status", "OK"),
+                    "attributes": filtered_attrs,
+                    "events": span_data.get("events", []),
+                    "children": [],
+                    "source": "mongodb",
+                })
+            
+            # Build hierarchy for DB spans
+            span_map = {s["span_id"]: s for s in db_spans}
+            roots = []
+            for span_dict in span_map.values():
+                parent_id = span_dict["parent_span_id"]
+                if parent_id and parent_id in span_map:
+                    span_map[parent_id]["children"].append(span_dict)
+                else:
+                    roots.append(span_dict)
+            
+            filtered_roots = _apply_span_depth_filter(roots, span_depth)
+            
+            traces.append({
+                "trace_id": db_trace.trace_id,
+                "spans": filtered_roots,
+                "source": "mongodb",
+                "timestamp": db_trace.timestamp,
+            })
+    
+    # Sort all traces by timestamp (most recent first)
+    # In-memory traces come first (source_priority=0), then MongoDB traces sorted by timestamp
+    def get_trace_sort_key(t):
+        source_priority = 0 if t.get("source") == "memory" else 1
+        timestamp = t.get("timestamp", "")
+        # Convert timestamp string to sortable format (ISO format strings sort correctly)
+        if isinstance(timestamp, str) and timestamp:
+            return (source_priority, timestamp)
+        return (source_priority, "9999-99-99")  # Put traces without timestamp at end
+    
+    traces.sort(key=get_trace_sort_key, reverse=False)  # Memory first, then DB by timestamp desc
+    
+    # Pagination
+    total = len(traces)
+    start, end = (page - 1) * limit, (page - 1) * limit + limit
+    paginated_traces = traces[start:end]
     
     return {
         "page": page,
         "limit": limit,
         "total": total,
         "total_pages": (total + limit - 1) // limit,
-        "data": traces,
+        "data": paginated_traces,
+        "sources": {
+            "memory": len([t for t in traces if t.get("source") == "memory"]),
+            "mongodb": len([t for t in traces if t.get("source") == "mongodb"]),
+        },
     }
 
 
@@ -270,92 +397,195 @@ async def observability_stats(
     user: UserIdentity = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
-    Return combined system + application + LLM observability metrics for current tenant.
+    Return all observability metrics in chart-friendly format.
+    All values are returned as arrays (last 15 data points) for line chart visualization.
+    Also includes current totals and averages.
     """
     import psutil
-    import random
     
-    tenant_id = user.tenant_id
+    tenant_id = str(user.tenant_id).lower()
     
-    # Get all spans and filter by tenant
-    all_spans = get_recent_spans(limit=10000, tenant_id=None)
+    # Initialize default values
+    total_results_generated = 0
+    total_tokens = 0
+    total_tokens_input = 0
+    total_tokens_output = 0
+    today_tokens = 0
+    today_results = 0
+    total_feedback = 0
+    positive_feedback = 0
+    negative_feedback = 0
+    trace_count = 0
     
-    # STRICT FILTERING: Only include LLM spans that match the requesting tenant
-    spans = []
-    for s in all_spans:
-        if "LLM.prompt" not in s.attributes:
-            continue
+    # Chart data defaults
+    labels = []
+    relevancy_data = []
+    faithfulness_data = []
+    confidence_data = []
+    hallucination_data = []
+    latency_data = []
+    tokens_input_data = []
+    tokens_output_data = []
+    
+    try:
+        eval_repo = get_evaluation_repository()
+        trace_repo = get_trace_repository()
+        feedback_repo = get_feedback_repository()
         
-        span_tenant = str(s.attributes.get("tenant_id", ""))
+        # Get comprehensive evaluation stats for this tenant from MongoDB
+        eval_stats = eval_repo.get_evaluation_stats(tenant_id)
+        if eval_stats:
+            total_results_generated = eval_stats.get("total", 0)
+            total_tokens_input = eval_stats.get("total_tokens_input", 0)
+            total_tokens_output = eval_stats.get("total_tokens_output", 0)
+            total_tokens = eval_stats.get("total_tokens", 0)
         
-        # Skip spans without tenant_id or from other tenants
-        if not span_tenant or span_tenant != str(tenant_id):
-            continue
+        # Get today's stats
+        today_stats = eval_repo.get_today_stats(tenant_id)
+        if today_stats:
+            today_results = today_stats.get("total_results", 0)
+            today_tokens = today_stats.get("total_tokens", 0)
         
-        spans.append(s)
-    
-    total_llm_calls = len(spans)
-    
-    # --- Application metrics ---
-    response_time_ms = random.randint(200, 300)
-    throughput_per_min = round(random.uniform(1.0, 1.5), 2)
-    error_rate_percent = round(random.uniform(1.5, 3.0), 2)
-    
-    # --- Quality metrics from spans ---
-    hallucination_scores = [float(s.attributes.get("LLM.hallucination_score", 0)) for s in spans]
-    semantic_similarities = [float(s.attributes.get("LLM.semantic_similarity_to_prompt", 0)) for s in spans]
-    
-    avg_hallucination_score = round(sum(hallucination_scores) / len(hallucination_scores), 3) if hallucination_scores else 0
-    avg_semantic_similarity = round(sum(semantic_similarities) / len(semantic_similarities), 3) if semantic_similarities else 0
+        # Get feedback stats from MongoDB
+        feedback_stats = feedback_repo.get_feedback_stats(tenant_id)
+        logger.debug(f"Feedback stats for tenant {tenant_id}: {feedback_stats}")
+        total_feedback = feedback_stats.get("total", 0)
+        positive_feedback = feedback_stats.get("positive", 0)
+        negative_feedback = feedback_stats.get("negative", 0)
+        
+        # Get trace count for this tenant
+        trace_count = trace_repo.count_by_tenant(tenant_id)
+        
+        # Get historical chart data (last 15 evaluations)
+        chart_data = eval_repo.get_historical_chart_data(tenant_id, limit=15)
+        labels = chart_data.get("timestamps", [])
+        relevancy_data = chart_data.get("relevancy", [])
+        faithfulness_data = chart_data.get("faithfulness", [])
+        confidence_data = chart_data.get("confidence", [])
+        hallucination_data = chart_data.get("hallucination", [])
+        latency_data = chart_data.get("latency", [])
+        tokens_input_data = chart_data.get("tokens_input", [])
+        tokens_output_data = chart_data.get("tokens_output", [])
+        
+    except Exception as e:
+        logger.warning(f"Failed to get DB stats: {e}")
     
     # --- System metrics ---
     cpu_usage = psutil.cpu_percent(interval=0.2)
     memory_usage = psutil.virtual_memory().percent
     disk_io = psutil.disk_io_counters()
     net_io = psutil.net_io_counters()
+    disk_io_mb = round(disk_io.write_bytes / 1024 / 1024, 2)
+    network_mb = round(net_io.bytes_sent / 1024 / 1024, 2)
     
-    system_metrics = {
+    # Add current system reading to history
+    _add_system_reading(tenant_id, cpu_usage, memory_usage, disk_io_mb, network_mb)
+    
+    # Get system performance history for charts
+    system_history = _get_system_history(tenant_id)
+    
+    # Calculate feedback ratio
+    feedback_ratio = round(positive_feedback / total_feedback, 3) if total_feedback > 0 else 0.0
+    
+    # Calculate current averages from chart data
+    avg_relevancy = round(sum(relevancy_data) / len(relevancy_data), 3) if relevancy_data else 0.0
+    avg_faithfulness = round(sum(faithfulness_data) / len(faithfulness_data), 3) if faithfulness_data else 0.0
+    avg_confidence = round(sum(confidence_data) / len(confidence_data), 3) if confidence_data else 0.0
+    avg_hallucination = round(sum(hallucination_data) / len(hallucination_data), 3) if hallucination_data else 0.0
+    avg_latency = round(sum(latency_data) / len(latency_data), 3) if latency_data else 0.0
+    
+    # Calculate system averages
+    cpu_data = system_history.get("cpu_usage", [])
+    memory_data = system_history.get("memory_usage", [])
+    disk_data = system_history.get("disk_io_mb", [])
+    network_data = system_history.get("network_mb", [])
+    
+    avg_cpu = round(sum(cpu_data) / len(cpu_data), 1) if cpu_data else 0.0
+    avg_memory = round(sum(memory_data) / len(memory_data), 1) if memory_data else 0.0
+    
+    # --- Response in chart-friendly format ---
+    return {
+        "tenant_id": tenant_id,
+        "labels": labels,  # X-axis labels (timestamps HH:MM)
+        
+        # Quality metrics as chart arrays
+        "relevancy": {
+            "data": relevancy_data,
+            "current": relevancy_data[-1] if relevancy_data else 0,
+            "average": avg_relevancy,
+        },
+        "faithfulness": {
+            "data": faithfulness_data,
+            "current": faithfulness_data[-1] if faithfulness_data else 0,
+            "average": avg_faithfulness,
+        },
+        "confidence": {
+            "data": confidence_data,
+            "current": confidence_data[-1] if confidence_data else 0,
+            "average": avg_confidence,
+        },
+        "hallucination": {
+            "data": hallucination_data,
+            "current": hallucination_data[-1] if hallucination_data else 0,
+            "average": avg_hallucination,
+        },
+        "latency": {
+            "data": latency_data,
+            "current": latency_data[-1] if latency_data else 0,
+            "average": avg_latency,
+        },
+        "tokens_input": {
+            "data": tokens_input_data,
+            "current": tokens_input_data[-1] if tokens_input_data else 0,
+            "total": total_tokens_input,
+        },
+        "tokens_output": {
+            "data": tokens_output_data,
+            "current": tokens_output_data[-1] if tokens_output_data else 0,
+            "total": total_tokens_output,
+        },
+        
+        # Summary totals
+        "totals": {
+            "results_generated": total_results_generated,
+            "tokens": total_tokens,
+            "tokens_input": total_tokens_input,
+            "tokens_output": total_tokens_output,
+            "today_results": today_results,
+            "today_tokens": today_tokens,
+            "traces": trace_count,
+            "feedback": total_feedback,
+            "positive_feedback": positive_feedback,
+            "negative_feedback": negative_feedback,
+            "feedback_ratio": feedback_ratio,
+        },
+        
+        # System performance in chart format
         "cpu_usage": {
-            "value": cpu_usage,
-            "change": round(random.uniform(-5, 5), 1),
-            "status": "warning" if cpu_usage > 80 else "success" if cpu_usage < 70 else "info",
+            "data": cpu_data,
+            "current": cpu_usage,
+            "average": avg_cpu,
         },
         "memory_usage": {
-            "value": memory_usage,
-            "change": round(random.uniform(-3, 3), 1),
-            "status": "success" if memory_usage < 85 else "warning",
+            "data": memory_data,
+            "current": memory_usage,
+            "average": avg_memory,
         },
         "disk_io": {
-            "value": round(disk_io.write_bytes / 1024 / 1024, 2),  # MB written
-            "change": round(random.uniform(-10, 10), 1),
-            "status": "info",
+            "data": disk_data,
+            "current": disk_io_mb,
         },
         "network": {
-            "value": round(net_io.bytes_sent / 1024 / 1024, 2),
-            "change": round(random.uniform(-10, 10), 1),
-            "status": "success",
+            "data": network_data,
+            "current": network_mb,
         },
-    }
-    
-    # --- Response ---
-    return {
-        "application_performance": {
-            "response_time_ms": response_time_ms,
-            "throughput_per_min": throughput_per_min,
-            "error_rate_percent": error_rate_percent,
-            "total_llm_calls": total_llm_calls,
-        },
-        "quality_metrics": {
-            "avg_semantic_similarity": avg_semantic_similarity,
-            "avg_hallucination_score": avg_hallucination_score,
-        },
-        "system_performance": system_metrics,
-        "status": {
-            "response_time": "success",
-            "throughput": "success",
-            "error_rate": "error" if error_rate_percent > 2 else "success",
-            "llm_calls": "success",
-        },
+        
+        # System labels (separate from quality labels since they're collected at different times)
+        "system_labels": system_history.get("timestamps", []),
+        
+        # Data point counts
+        "data_points": len(labels),
+        "system_data_points": len(cpu_data),
     }
 
 
@@ -1114,3 +1344,439 @@ def _filter_attributes(
                 result[key_str] = str(value)
     
     return result
+
+
+# ============================================================
+# === MongoDB-based Endpoints ===
+# ============================================================
+
+@router.get("/db/traces")
+async def get_db_traces(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=500),
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get traces from MongoDB.
+    
+    Returns persisted traces with full span data.
+    Filtered by tenant_id for non-admin users.
+    """
+    try:
+        trace_repo = get_trace_repository()
+        
+        skip = (page - 1) * limit
+        
+        if user.is_admin:
+            traces = trace_repo.list_recent(limit=limit)
+            total = trace_repo.count_by_tenant(user.tenant_id)  # Approximate
+        else:
+            traces = trace_repo.list_by_tenant(user.tenant_id, limit=limit, skip=skip)
+            total = trace_repo.count_by_tenant(user.tenant_id)
+        
+        return {
+            "traces": [t.to_dict() for t in traces],
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "source": "mongodb",
+        }
+    except Exception as e:
+        logger.error(f"Failed to get traces from MongoDB: {e}")
+        return {
+            "traces": [],
+            "total": 0,
+            "page": page,
+            "limit": limit,
+            "source": "mongodb",
+            "error": str(e),
+        }
+
+
+@router.get("/db/traces/{trace_id}")
+async def get_db_trace_by_id(
+    trace_id: str,
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get a specific trace from MongoDB by trace_id.
+    """
+    try:
+        trace_repo = get_trace_repository()
+        trace = trace_repo.get_by_id(trace_id)
+        
+        if trace is None:
+            return {"error": "Trace not found", "trace_id": trace_id}
+        
+        # Check tenant access
+        if not user.is_admin and trace.tenant_id != user.tenant_id:
+            return {"error": "Access denied", "trace_id": trace_id}
+        
+        return {
+            "trace": trace.to_dict(),
+            "source": "mongodb",
+        }
+    except Exception as e:
+        logger.error(f"Failed to get trace from MongoDB: {e}")
+        return {"error": str(e), "trace_id": trace_id}
+
+
+@router.get("/db/evaluations")
+async def get_db_evaluations(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=500),
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get LLM evaluations from MongoDB.
+    
+    Returns evaluation metrics for LLM responses including:
+    - Self-reported metrics (confidence, hallucination risk)
+    - Calculated metrics (semantic similarity, faithfulness)
+    - Prompt similarity metrics
+    """
+    try:
+        eval_repo = get_evaluation_repository()
+        
+        evaluations = eval_repo.list_by_tenant(user.tenant_id, limit=limit)
+        stats = eval_repo.get_evaluation_stats(user.tenant_id)
+        
+        return {
+            "evaluations": [e.to_dict() for e in evaluations],
+            "stats": stats,
+            "total": len(evaluations),
+            "page": page,
+            "limit": limit,
+            "source": "mongodb",
+        }
+    except Exception as e:
+        logger.error(f"Failed to get evaluations from MongoDB: {e}")
+        return {
+            "evaluations": [],
+            "stats": {},
+            "total": 0,
+            "page": page,
+            "limit": limit,
+            "source": "mongodb",
+            "error": str(e),
+        }
+
+
+@router.get("/db/evaluations/{conversation_id}")
+async def get_db_evaluation_by_conversation(
+    conversation_id: str,
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get evaluation for a specific conversation from MongoDB.
+    """
+    try:
+        eval_repo = get_evaluation_repository()
+        evaluation = eval_repo.get_by_conversation_id(conversation_id)
+        
+        if evaluation is None:
+            return {"error": "Evaluation not found", "conversation_id": conversation_id}
+        
+        # Check tenant access
+        if not user.is_admin and evaluation.tenant_id != user.tenant_id:
+            return {"error": "Access denied", "conversation_id": conversation_id}
+        
+        return {
+            "evaluation": evaluation.to_dict(),
+            "source": "mongodb",
+        }
+    except Exception as e:
+        logger.error(f"Failed to get evaluation from MongoDB: {e}")
+        return {"error": str(e), "conversation_id": conversation_id}
+
+
+@router.get("/db/feedback")
+async def get_db_feedback(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=500),
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get feedback from MongoDB.
+    
+    Returns user feedback with statistics.
+    """
+    try:
+        feedback_repo = get_feedback_repository()
+        
+        if user.is_admin:
+            feedbacks = feedback_repo.list_all(limit=limit)
+        else:
+            feedbacks = feedback_repo.list_by_tenant(user.tenant_id, limit=limit)
+        
+        stats = feedback_repo.get_feedback_stats(user.tenant_id if not user.is_admin else None)
+        
+        return {
+            "feedbacks": [f.to_dict() for f in feedbacks],
+            "stats": stats,
+            "total": len(feedbacks),
+            "page": page,
+            "limit": limit,
+            "source": "mongodb",
+        }
+    except Exception as e:
+        logger.error(f"Failed to get feedback from MongoDB: {e}")
+        return {
+            "feedbacks": [],
+            "stats": {},
+            "total": 0,
+            "page": page,
+            "limit": limit,
+            "source": "mongodb",
+            "error": str(e),
+        }
+
+
+@router.get("/db/prompts")
+async def get_db_prompts(
+    limit: int = Query(default=50, ge=1, le=500),
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get stored prompts from MongoDB.
+    
+    Returns prompts with their quality scores and feedback.
+    Used for prompt similarity analysis.
+    """
+    try:
+        prompt_repo = get_prompt_repository()
+        
+        prompts = prompt_repo.get_recent_prompts(
+            tenant_id=user.tenant_id if not user.is_admin else None,
+            limit=limit,
+        )
+        
+        total = prompt_repo.count_prompts(user.tenant_id if not user.is_admin else None)
+        
+        # Don't include embeddings in response (too large)
+        prompts_data = []
+        for p in prompts:
+            data = p.to_dict()
+            data.pop("embedding", None)  # Remove embedding from response
+            prompts_data.append(data)
+        
+        return {
+            "prompts": prompts_data,
+            "total": total,
+            "limit": limit,
+            "source": "mongodb",
+        }
+    except Exception as e:
+        logger.error(f"Failed to get prompts from MongoDB: {e}")
+        return {
+            "prompts": [],
+            "total": 0,
+            "limit": limit,
+            "source": "mongodb",
+            "error": str(e),
+        }
+
+
+@router.get("/db/prompt-similarity")
+async def compute_prompt_similarity_endpoint(
+    prompt: str = Query(..., description="Prompt text to find similar prompts for"),
+    top_k: int = Query(default=5, ge=1, le=20),
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Compute similarity between a prompt and stored prompts.
+    
+    Returns similar past prompts with their quality scores.
+    Useful for predicting response quality based on historical data.
+    """
+    try:
+        from app.rag.utils.prompt_similarity import get_prompt_similarity_service
+        
+        service = get_prompt_similarity_service()
+        result = service.compute_similarity(
+            prompt_text=prompt,
+            tenant_id=user.tenant_id,
+            top_k=top_k,
+        )
+        
+        # Convert similar prompts to dicts
+        similar_prompts = []
+        for sp in result.similar_prompts:
+            similar_prompts.append({
+                "prompt_id": sp.prompt_id,
+                "prompt_text": sp.prompt_text,
+                "similarity_score": sp.similarity_score,
+                "quality_score": sp.quality_score,
+                "feedback_rating": sp.feedback_rating,
+                "conversation_id": sp.conversation_id,
+            })
+        
+        # Get quality prediction
+        predicted_quality, confidence = service.get_quality_prediction(
+            prompt_text=prompt,
+            tenant_id=user.tenant_id,
+        )
+        
+        return {
+            "query_prompt": prompt[:200],  # Truncate for response
+            "similar_prompts": similar_prompts,
+            "metrics": {
+                "total_prompts_searched": result.total_prompts_searched,
+                "avg_similarity": result.avg_similarity,
+                "max_similarity": result.max_similarity,
+                "avg_quality_of_similar": result.avg_quality_of_similar,
+                "positive_feedback_ratio": result.positive_feedback_ratio,
+            },
+            "quality_prediction": {
+                "predicted_quality": predicted_quality,
+                "confidence": confidence,
+            },
+            "source": "mongodb",
+        }
+    except Exception as e:
+        logger.error(f"Failed to compute prompt similarity: {e}")
+        return {
+            "query_prompt": prompt[:200],
+            "similar_prompts": [],
+            "metrics": {},
+            "quality_prediction": {},
+            "source": "mongodb",
+            "error": str(e),
+        }
+
+
+@router.get("/db/stats")
+async def get_db_stats(
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get aggregated statistics from MongoDB.
+    
+    Returns combined stats for traces, evaluations, feedback, and prompts.
+    """
+    try:
+        trace_repo = get_trace_repository()
+        eval_repo = get_evaluation_repository()
+        feedback_repo = get_feedback_repository()
+        prompt_repo = get_prompt_repository()
+        
+        tenant_id = user.tenant_id if not user.is_admin else None
+        
+        return {
+            "traces": {
+                "count": trace_repo.count_by_tenant(user.tenant_id),
+            },
+            "evaluations": eval_repo.get_evaluation_stats(tenant_id),
+            "feedback": feedback_repo.get_feedback_stats(tenant_id),
+            "prompts": {
+                "count": prompt_repo.count_prompts(tenant_id),
+            },
+            "source": "mongodb",
+        }
+    except Exception as e:
+        logger.error(f"Failed to get DB stats: {e}")
+        return {
+            "traces": {"count": 0},
+            "evaluations": {},
+            "feedback": {},
+            "prompts": {"count": 0},
+            "source": "mongodb",
+            "error": str(e),
+        }
+
+
+@router.get("/db/debug")
+async def get_db_debug(
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Debug endpoint to check MongoDB contents.
+    
+    Shows all tenant_ids in the traces collection and counts.
+    """
+    try:
+        trace_repo = get_trace_repository()
+        coll = trace_repo.collection
+        
+        if coll is None:
+            return {"error": "MongoDB collection not available"}
+        
+        # Get all unique tenant_ids
+        tenant_ids = coll.distinct("tenant_id")
+        
+        # Count traces per tenant
+        tenant_counts = {}
+        for tid in tenant_ids:
+            count = coll.count_documents({"tenant_id": tid})
+            tenant_counts[str(tid)] = count
+        
+        # Get total count
+        total = coll.count_documents({})
+        
+        # Get sample traces
+        sample_traces = []
+        for doc in coll.find().limit(5):
+            sample_traces.append({
+                "trace_id": doc.get("trace_id"),
+                "tenant_id": doc.get("tenant_id"),
+                "timestamp": doc.get("timestamp"),
+                "total_spans": doc.get("total_spans"),
+            })
+        
+        # Check for current user's traces
+        user_traces_count = coll.count_documents({"tenant_id": str(user.tenant_id)})
+        
+        return {
+            "current_user_tenant_id": str(user.tenant_id),
+            "current_user_traces_count": user_traces_count,
+            "total_traces": total,
+            "unique_tenant_ids": tenant_ids,
+            "traces_per_tenant": tenant_counts,
+            "sample_traces": sample_traces,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get DB debug info: {e}")
+        return {"error": str(e)}
+
+
+@router.get("/resource-quotas")
+async def get_resource_quota_stats(
+    user: UserIdentity = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get resource quota statistics for all tenants.
+    
+    Returns current resource usage, limits, and fairness metrics.
+    Useful for monitoring fair resource distribution across tenants.
+    """
+    try:
+        manager = get_resource_manager()
+        stats = manager.get_stats()
+        fairness = manager.get_fairness_metrics()
+        
+        # Get current tenant's quota info
+        quota = manager.get_tenant_quota(user.tenant_id)
+        state = manager.get_tenant_state(user.tenant_id)
+        
+        return {
+            "current_tenant": {
+                "tenant_id": user.tenant_id,
+                "concurrent_requests": state.concurrent_requests,
+                "concurrent_limit": quota.max_concurrent_requests,
+                "requests_this_minute": state.requests_this_minute,
+                "rate_limit": quota.requests_per_minute,
+                "tokens_this_minute": state.tokens_this_minute,
+                "token_limit": quota.tokens_per_minute,
+                "total_requests": state.total_requests,
+                "rejected_requests": state.rejected_requests,
+            },
+            "global": {
+                "concurrent": stats["global_concurrent"],
+                "max_concurrent": stats["global_max_concurrent"],
+            },
+            "all_tenants": stats["tenants"],
+            "fairness": fairness,
+        }
+    except Exception as e:
+        logger.error(f"Failed to get resource quota stats: {e}")
+        return {"error": str(e)}

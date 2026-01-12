@@ -46,6 +46,13 @@ from .rate_limit import (
     get_rate_limiter,
     rate_limit,
 )
+from .resource_quota import (
+    TenantQuota,
+    TenantResourceManager,
+    ResourceQuotaMiddleware,
+    get_resource_manager,
+    configure_tenant_quotas,
+)
 
 __all__ = [
     # Config
@@ -78,4 +85,10 @@ __all__ = [
     "RateLimitMiddleware",
     "get_rate_limiter",
     "rate_limit",
+    # Resource Quota
+    "TenantQuota",
+    "TenantResourceManager",
+    "ResourceQuotaMiddleware",
+    "get_resource_manager",
+    "configure_tenant_quotas",
 ]

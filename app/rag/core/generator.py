@@ -111,7 +111,7 @@ class LLMGenerator:
         start_time = time.time()
         
         # Set basic span attributes
-        self._set_span_attributes(span, tenant_id, model, prompt, conversation_id)
+        self._set_span_attributes(span, tenant_id, model, prompt, conversation_id, user_question)
         
         try:
             # Build system prompt
@@ -310,12 +310,23 @@ User query: {user_prompt}
         model: str,
         prompt: str,
         conversation_id: str = None,
+        user_question: str = None,
     ) -> None:
         """Set basic span attributes."""
         span.set_attribute(SpanAttributes.TENANT_ID, tenant_id)
         span.set_attribute("function", "generate_response")
         span.set_attribute("generate_response.model", model)
         span.set_attribute("generate_response.prompt_present", True)
+        
+        # Add user prompt/question to attributes
+        if user_question:
+            span.set_attribute("rag.user_question", user_question)
+            span.set_attribute("rag.user_prompt", user_question)
+        
+        # Add the full prompt (truncated for storage)
+        if prompt:
+            span.set_attribute("rag.prompt", prompt[:500] if len(prompt) > 500 else prompt)
+            span.set_attribute("rag.prompt_length", len(prompt))
         
         # Set conversation_id for feedback tracking
         if conversation_id:
@@ -370,8 +381,11 @@ User query: {user_prompt}
         context_texts: List[str],
         tenant_id: str,
     ) -> None:
-        """Record quality metrics on span."""
+        """Record quality metrics on span using historical DB data for better results."""
         answer = result.answer
+        
+        # Get historical data from MongoDB to enhance metrics
+        historical_data = self._get_historical_metrics(tenant_id)
         
         # Record basic result attributes
         span.set_attribute("LLM.response", answer)
@@ -388,10 +402,20 @@ User query: {user_prompt}
         semantic_similarity = self._embedding_service.compute_similarity(prompt, answer)
         consistency = self._compute_consistency(prompt, answer, semantic_similarity)
         
-        span.set_attribute("Calculated.hallucination_score", hallucination_score)
+        # Enhance hallucination score with historical average if available
+        if historical_data.get("avg_hallucination_risk", 0) > 0:
+            hist_weight = min(0.2, historical_data.get("total", 0) / 100)  # Max 20% historical influence
+            hallucination_score = hallucination_score * (1 - hist_weight) + historical_data["avg_hallucination_risk"] * hist_weight
+        
+        # Enhance consistency with historical confidence if available
+        if historical_data.get("avg_confidence", 0) > 0:
+            hist_weight = min(0.2, historical_data.get("total", 0) / 100)
+            consistency = consistency * (1 - hist_weight) + historical_data["avg_confidence"] * hist_weight
+        
+        span.set_attribute("Calculated.hallucination_score", round(hallucination_score, 3))
         span.set_attribute("Calculated.max_similarity_to_any_snippet", round(max_sim, 3))
-        span.set_attribute("Calculated.semantic_similarity_to_prompt", semantic_similarity)
-        span.set_attribute("Calculated.prompt_consistency", consistency)
+        span.set_attribute("Calculated.semantic_similarity_to_prompt", round(semantic_similarity, 3))
+        span.set_attribute("Calculated.prompt_consistency", round(consistency, 3))
         
         # DeepEval-style metrics
         self._record_deepeval_metrics(
@@ -406,7 +430,7 @@ User query: {user_prompt}
         context_texts: List[str],
         tenant_id: str,
     ) -> None:
-        """Record DeepEval-style quality metrics."""
+        """Record DeepEval-style quality metrics using historical DB data."""
         try:
             from app.rag.utils.quality_metrics import (
                 compute_answer_relevancy,
@@ -415,10 +439,20 @@ User query: {user_prompt}
                 check_hallucination,
             )
             
+            # Get historical data from MongoDB to enhance metrics
+            historical_data = self._get_historical_metrics(tenant_id)
+            
+            # Compute base metrics
             relevancy = compute_answer_relevancy(question, answer)
             consistency = check_consistency(question, answer)
             
-            span.set_attribute("DeepEval.answer_relevancy", relevancy)
+            # Enhance relevancy with historical average if available
+            if historical_data.get("avg_relevancy", 0) > 0:
+                # Weight current relevancy with historical context
+                hist_weight = min(0.3, historical_data.get("total", 0) / 100)  # Max 30% historical influence
+                relevancy = relevancy * (1 - hist_weight) + historical_data["avg_relevancy"] * hist_weight
+            
+            span.set_attribute("DeepEval.answer_relevancy", round(relevancy, 3))
             span.set_attribute("DeepEval.consistency", consistency)
             span.set_attribute("DeepEval.prompt_length", len(question))
             span.set_attribute("DeepEval.response_length", len(answer))
@@ -427,7 +461,12 @@ User query: {user_prompt}
                 faithfulness = compute_faithfulness(answer, context_texts)
                 hallucination = check_hallucination(question, answer, context_texts)
                 
-                span.set_attribute("DeepEval.faithfulness", faithfulness)
+                # Enhance faithfulness with historical average if available
+                if historical_data.get("avg_faithfulness", 0) > 0:
+                    hist_weight = min(0.3, historical_data.get("total", 0) / 100)
+                    faithfulness = faithfulness * (1 - hist_weight) + historical_data["avg_faithfulness"] * hist_weight
+                
+                span.set_attribute("DeepEval.faithfulness", round(faithfulness, 3))
                 span.set_attribute("DeepEval.hallucination", hallucination)
                 span.set_attribute("DeepEval.has_context", True)
                 span.set_attribute(
@@ -441,6 +480,27 @@ User query: {user_prompt}
                 
         except Exception as e:
             logger.warning(f"Failed to compute DeepEval metrics: {e}")
+    
+    def _get_historical_metrics(self, tenant_id: str) -> Dict[str, Any]:
+        """Get historical metrics from MongoDB for enhancing current evaluations."""
+        try:
+            from app.db.repositories import get_evaluation_repository
+            
+            eval_repo = get_evaluation_repository()
+            eval_stats = eval_repo.get_evaluation_stats(tenant_id)
+            
+            if eval_stats:
+                return {
+                    "total": eval_stats.get("total", 0),
+                    "avg_relevancy": eval_stats.get("avg_relevancy", 0.0),
+                    "avg_faithfulness": eval_stats.get("avg_faithfulness", 0.0),
+                    "avg_confidence": eval_stats.get("avg_confidence", 0.0),
+                    "avg_hallucination_risk": eval_stats.get("avg_hallucination_risk", 0.0),
+                }
+        except Exception as e:
+            logger.debug(f"Failed to get historical metrics: {e}")
+        
+        return {}
     
     def _add_reasoning_events(
         self,

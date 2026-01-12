@@ -1,0 +1,415 @@
+{
+  "timestamp": "2025-12-29T00:31:00.783487+00:00",
+  "single_tenant_burst": {
+    "tenant": "tenant_a",
+    "total_requests": 20,
+    "concurrency": 10,
+    "successful": 7,
+    "rate_limited": 13,
+    "success_rate": 35.0,
+    "rate_limit_rate": 65.0,
+    "avg_latency": 33845.027685165405,
+    "results": [
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 12346.794128417969,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 12356.298923492432,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 18164.716958999634,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 27681.824922561646,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 27690.46902656555,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 27715.85202217102,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": true,
+        "latency_ms": 27719.851970672607,
+        "rate_limited": false,
+        "status_code": 200
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 15371.360063552856,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": true,
+        "latency_ms": 27740.94009399414,
+        "rate_limited": false,
+        "status_code": 200
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": true,
+        "latency_ms": 33580.24597167969,
+        "rate_limited": false,
+        "status_code": 200
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 5897.574186325073,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 5897.780895233154,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 20306.904077529907,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 20308.05993080139,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 20310.208797454834,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": true,
+        "latency_ms": 48030.1718711853,
+        "rate_limited": false,
+        "status_code": 200
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": false,
+        "latency_ms": 14453.419923782349,
+        "rate_limited": true,
+        "status_code": 429,
+        "error": "RATE_LIMITED"
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": true,
+        "latency_ms": 35676.90086364746,
+        "rate_limited": false,
+        "status_code": 200
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": true,
+        "latency_ms": 36869.510889053345,
+        "rate_limited": false,
+        "status_code": 200
+      },
+      {
+        "tenant_id": "tenant_a",
+        "success": true,
+        "latency_ms": 27297.572135925293,
+        "rate_limited": false,
+        "status_code": 200
+      }
+    ]
+  },
+  "multi_tenant_load": {
+    "requests_per_tenant": 5,
+    "success_per_tenant": {
+      "tenant_a": 5,
+      "tenant_b": 5,
+      "tenant_c": 5,
+      "tenant_d": 5,
+      "tenant_e": 4,
+      "tenant_f": 5,
+      "tenant_g": 5,
+      "tenant_h": 4,
+      "tenant_i": 5,
+      "tenant_j": 5
+    },
+    "rate_limited_per_tenant": {
+      "tenant_a": 0,
+      "tenant_b": 0,
+      "tenant_c": 0,
+      "tenant_d": 0,
+      "tenant_e": 1,
+      "tenant_f": 0,
+      "tenant_g": 0,
+      "tenant_h": 1,
+      "tenant_i": 0,
+      "tenant_j": 0
+    },
+    "avg_latency_per_tenant": {
+      "tenant_a": 60759.48610305786,
+      "tenant_b": 60759.282541275024,
+      "tenant_c": 60759.08536911011,
+      "tenant_d": 69132.03806877136,
+      "tenant_e": 70055.8620095253,
+      "tenant_f": 69131.34341239929,
+      "tenant_g": 69131.96930885315,
+      "tenant_h": 70054.95661497116,
+      "tenant_i": 69131.04586601257,
+      "tenant_j": 69131.61664009094
+    },
+    "fairness_index": 0.993103448275862,
+    "total_successful": 48,
+    "total_requests": 50
+  },
+  "greedy_tenant": {
+    "greedy_tenant": "tenant_a",
+    "greedy_requests": 15,
+    "greedy_concurrency": 10,
+    "greedy_successful": 2,
+    "greedy_rate_limited": 6,
+    "greedy_throttle_rate": 40.0,
+    "other_tenants_success": {
+      "tenant_b": 3,
+      "tenant_c": 3,
+      "tenant_d": 3,
+      "tenant_e": 3,
+      "tenant_f": 3,
+      "tenant_g": 3,
+      "tenant_h": 2,
+      "tenant_i": 2,
+      "tenant_j": 2
+    },
+    "other_tenants_total": 24,
+    "other_tenants_expected": 27,
+    "protection_effective": true
+  },
+  "fairness_metrics": {},
+  "quota_stats": {
+    "current_tenant": {
+      "tenant_id": "tenant_a",
+      "concurrent_requests": 0,
+      "concurrent_limit": 3,
+      "requests_this_minute": 0,
+      "rate_limit": 15,
+      "tokens_this_minute": 0,
+      "token_limit": 30000,
+      "total_requests": 110,
+      "rejected_requests": 22
+    },
+    "global": {
+      "concurrent": 0,
+      "max_concurrent": 50
+    },
+    "all_tenants": {
+      "tenant_a": {
+        "concurrent": 0,
+        "concurrent_limit": 3,
+        "requests_this_minute": 0,
+        "rate_limit": 15,
+        "tokens_this_minute": 0,
+        "token_limit": 30000,
+        "total_requests": 110,
+        "total_tokens": 0,
+        "rejected_requests": 22,
+        "utilization_pct": 0.0
+      },
+      "tenant_b": {
+        "concurrent": 0,
+        "concurrent_limit": 3,
+        "requests_this_minute": 0,
+        "rate_limit": 15,
+        "tokens_this_minute": 0,
+        "token_limit": 30000,
+        "total_requests": 93,
+        "total_tokens": 0,
+        "rejected_requests": 0,
+        "utilization_pct": 0.0
+      },
+      "tenant_c": {
+        "concurrent": 0,
+        "concurrent_limit": 3,
+        "requests_this_minute": 0,
+        "rate_limit": 15,
+        "tokens_this_minute": 0,
+        "token_limit": 30000,
+        "total_requests": 84,
+        "total_tokens": 0,
+        "rejected_requests": 0,
+        "utilization_pct": 0.0
+      },
+      "tenant_d": {
+        "concurrent": 0,
+        "concurrent_limit": 3,
+        "requests_this_minute": 0,
+        "rate_limit": 15,
+        "tokens_this_minute": 0,
+        "token_limit": 30000,
+        "total_requests": 76,
+        "total_tokens": 0,
+        "rejected_requests": 0,
+        "utilization_pct": 0.0
+      },
+      "tenant_e": {
+        "concurrent": 0,
+        "concurrent_limit": 3,
+        "requests_this_minute": 0,
+        "rate_limit": 15,
+        "tokens_this_minute": 0,
+        "token_limit": 30000,
+        "total_requests": 69,
+        "total_tokens": 0,
+        "rejected_requests": 0,
+        "utilization_pct": 0.0
+      },
+      "anonymous": {
+        "concurrent": 0,
+        "concurrent_limit": 5,
+        "requests_this_minute": 0,
+        "rate_limit": 30,
+        "tokens_this_minute": 0,
+        "token_limit": 50000,
+        "total_requests": 74,
+        "total_tokens": 0,
+        "rejected_requests": 14,
+        "utilization_pct": 0.0
+      },
+      "tenant_f": {
+        "concurrent": 0,
+        "concurrent_limit": 5,
+        "requests_this_minute": 0,
+        "rate_limit": 30,
+        "tokens_this_minute": 0,
+        "token_limit": 50000,
+        "total_requests": 41,
+        "total_tokens": 0,
+        "rejected_requests": 0,
+        "utilization_pct": 0.0
+      },
+      "tenant_g": {
+        "concurrent": 0,
+        "concurrent_limit": 5,
+        "requests_this_minute": 1,
+        "rate_limit": 30,
+        "tokens_this_minute": 0,
+        "token_limit": 50000,
+        "total_requests": 42,
+        "total_tokens": 0,
+        "rejected_requests": 0,
+        "utilization_pct": 0.0
+      },
+      "tenant_h": {
+        "concurrent": 0,
+        "concurrent_limit": 5,
+        "requests_this_minute": 1,
+        "rate_limit": 30,
+        "tokens_this_minute": 0,
+        "token_limit": 50000,
+        "total_requests": 41,
+        "total_tokens": 0,
+        "rejected_requests": 0,
+        "utilization_pct": 0.0
+      },
+      "tenant_i": {
+        "concurrent": 0,
+        "concurrent_limit": 5,
+        "requests_this_minute": 0,
+        "rate_limit": 30,
+        "tokens_this_minute": 0,
+        "token_limit": 50000,
+        "total_requests": 37,
+        "total_tokens": 0,
+        "rejected_requests": 0,
+        "utilization_pct": 0.0
+      },
+      "tenant_j": {
+        "concurrent": 0,
+        "concurrent_limit": 5,
+        "requests_this_minute": 0,
+        "rate_limit": 30,
+        "tokens_this_minute": 0,
+        "token_limit": 50000,
+        "total_requests": 39,
+        "total_tokens": 0,
+        "rejected_requests": 0,
+        "utilization_pct": 0.0
+      }
+    },
+    "fairness": {
+      "fairness_index": 0.8741822671675664,
+      "tenants": 11,
+      "total_requests": 706,
+      "requests_per_tenant": {
+        "tenant_a": 110,
+        "tenant_b": 93,
+        "tenant_c": 84,
+        "tenant_d": 76,
+        "tenant_e": 69,
+        "anonymous": 74,
+        "tenant_f": 41,
+        "tenant_g": 42,
+        "tenant_h": 41,
+        "tenant_i": 37,
+        "tenant_j": 39
+      },
+      "rejected_per_tenant": {
+        "tenant_a": 22,
+        "tenant_b": 0,
+        "tenant_c": 0,
+        "tenant_d": 0,
+        "tenant_e": 0,
+        "anonymous": 14,
+        "tenant_f": 0,
+        "tenant_g": 0,
+        "tenant_h": 0,
+        "tenant_i": 0,
+        "tenant_j": 0
+      }
+    }
+  }
+}

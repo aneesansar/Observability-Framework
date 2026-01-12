@@ -71,6 +71,24 @@ class Settings(BaseSettings):
         alias="MONGO_COLL",
     )
     
+    # MongoDB Collections for Observability
+    mongo_traces_coll: str = Field(
+        default="traces",
+        alias="MONGO_TRACES_COLL",
+    )
+    mongo_feedback_coll: str = Field(
+        default="feedback",
+        alias="MONGO_FEEDBACK_COLL",
+    )
+    mongo_evaluations_coll: str = Field(
+        default="evaluations",
+        alias="MONGO_EVALUATIONS_COLL",
+    )
+    mongo_prompts_coll: str = Field(
+        default="prompts",
+        alias="MONGO_PROMPTS_COLL",
+    )
+    
     # Models / Embeddings
     embed_model: str = Field(
         default="all-MiniLM-L6-v2",

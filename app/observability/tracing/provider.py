@@ -20,6 +20,7 @@ from opentelemetry.trace import Tracer, get_current_span as _get_current_span
 
 from ..config import observability_settings
 from .exporters.inmemory import InMemorySpanExporter, get_inmemory_exporter
+from .exporters.mongodb import MongoDBSpanExporter, get_mongodb_exporter
 from .processors.tenant_processor import TenantSpanProcessor
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ class TracingProvider:
         
         self._provider: Optional[TracerProvider] = None
         self._inmemory_exporter: Optional[InMemorySpanExporter] = None
+        self._mongodb_exporter: Optional[MongoDBSpanExporter] = None
         TracingProvider._initialized = True
     
     def setup(
@@ -58,6 +60,7 @@ class TracingProvider:
         service_name: Optional[str] = None,
         otlp_endpoint: Optional[str] = None,
         enable_inmemory: bool = True,
+        enable_mongodb: bool = True,
     ) -> TracerProvider:
         """
         Configure and set up the TracerProvider.
@@ -66,6 +69,7 @@ class TracingProvider:
             service_name: Override service name from settings
             otlp_endpoint: OTLP exporter endpoint (optional)
             enable_inmemory: Enable in-memory span storage
+            enable_mongodb: Enable MongoDB span persistence
             
         Returns:
             Configured TracerProvider
@@ -90,6 +94,10 @@ class TracingProvider:
             )
             logger.info("InMemorySpanExporter registered")
         
+        # Add MongoDB exporter for persistent storage
+        if enable_mongodb:
+            self._setup_mongodb_exporter()
+        
         # Add OTLP exporter if configured
         otlp_endpoint = otlp_endpoint or observability_settings.otlp_endpoint
         if otlp_endpoint:
@@ -100,6 +108,17 @@ class TracingProvider:
         logger.info(f"TracerProvider configured for service: {service_name}")
         
         return self._provider
+    
+    def _setup_mongodb_exporter(self) -> None:
+        """Configure MongoDB exporter for persistent trace storage."""
+        try:
+            self._mongodb_exporter = get_mongodb_exporter()
+            self._provider.add_span_processor(
+                BatchSpanProcessor(self._mongodb_exporter)
+            )
+            logger.info("MongoDBSpanExporter registered")
+        except Exception as e:
+            logger.warning(f"Failed to configure MongoDB exporter: {e}")
     
     def _setup_otlp_exporter(self, endpoint: str) -> None:
         """

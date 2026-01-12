@@ -154,8 +154,8 @@ async def create_feedback(
     Raises:
         HTTPException: If creation fails or validation fails
     """
-    # Use tenant from header or from user
-    tenant_id = x_tenant_id or user.tenant_id
+    # Use tenant from header or from user (normalize to lowercase for consistency)
+    tenant_id = str(x_tenant_id or user.tenant_id).lower()
     
     try:
         # Generate feedback ID

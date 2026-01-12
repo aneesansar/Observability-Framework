@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 load_dotenv()
 
 # Import core configuration
-from app.core import settings, AppError
+from app.core import settings, AppError, ResourceQuotaMiddleware, get_resource_manager, configure_tenant_quotas
 
 # Import observability (sets up tracing before other imports)
 from app.observability import (
@@ -125,8 +125,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Tenant/Auth middleware
+# Resource Quota middleware (added BEFORE TenantMiddleware so it runs AFTER in the chain)
+# FastAPI middleware order is reversed: last added = first executed
+app.add_middleware(ResourceQuotaMiddleware)
+
+# Tenant/Auth middleware (runs first to set tenant_id)
 app.add_middleware(TenantMiddleware)
+
+# Configure tenant quotas for fair resource distribution
+# Lower limits to make rate limiting more visible in testing
+configure_tenant_quotas({
+    "tenant_a": {"max_concurrent_requests": 3, "requests_per_minute": 15, "tokens_per_minute": 30000},
+    "tenant_b": {"max_concurrent_requests": 3, "requests_per_minute": 15, "tokens_per_minute": 30000},
+    "tenant_c": {"max_concurrent_requests": 3, "requests_per_minute": 15, "tokens_per_minute": 30000},
+    "tenant_d": {"max_concurrent_requests": 3, "requests_per_minute": 15, "tokens_per_minute": 30000},
+    "tenant_e": {"max_concurrent_requests": 3, "requests_per_minute": 15, "tokens_per_minute": 30000},
+})
 
 
 # ============================================================
