@@ -29,7 +29,8 @@ async def get_current_user(
     FastAPI dependency to get the current authenticated user.
     
     Validates the bearer token and returns user identity.
-    Also stores user info in request.state for middleware access.
+    If the middleware has already set tenant_id from x-tenant-id header,
+    that value takes precedence over the token-derived tenant_id.
     
     Args:
         request: FastAPI request object
@@ -41,9 +42,14 @@ async def get_current_user(
     Raises:
         HTTPException: If authentication fails
     """
+    # Check if middleware already set user_identity with correct tenant
+    if hasattr(request.state, "user_identity"):
+        return request.state.user_identity
+    
     # Dev mode bypass
     if auth_settings.disable_auth:
         user = UserIdentity.dev_user()
+        user = _apply_tenant_override(request, user)
         _store_in_request_state(request, user)
         return user
     
@@ -57,6 +63,8 @@ async def get_current_user(
     
     try:
         user = auth_service.validate_token(token)
+        # Apply tenant override from x-tenant-id header if present
+        user = _apply_tenant_override(request, user)
         _store_in_request_state(request, user)
         return user
     except AuthError as e:
@@ -207,6 +215,61 @@ def require_same_tenant(tenant_id_param: str = "tenant_id"):
     return tenant_checker
 
 
+def _apply_tenant_override(request: Request, user: UserIdentity) -> UserIdentity:
+    """
+    Apply tenant override from x-tenant-id header if present.
+    
+    Parses roles in TenantA:Admin format to validate access.
+    
+    Args:
+        request: FastAPI request object
+        user: Original user identity
+        
+    Returns:
+        UserIdentity with tenant_id from header if valid
+    """
+    from .config import auth_settings
+    
+    # Get tenant from header
+    requested_tenant = request.headers.get(auth_settings.tenant_header)
+    if not requested_tenant:
+        return user
+    
+    # If user has accessible_tenants, validate access
+    if user.accessible_tenants and requested_tenant not in user.accessible_tenants:
+        # User doesn't have access to this tenant
+        # But if validate_tenant_access is False, allow it anyway
+        if auth_settings.validate_tenant_access:
+            logger.warning(
+                f"User '{user.username}' requested tenant '{requested_tenant}' "
+                f"but only has access to: {user.accessible_tenants}"
+            )
+            # Don't override, keep original tenant
+            return user
+    
+    # Override tenant_id
+    if requested_tenant != user.tenant_id:
+        # Get role for the new tenant
+        tenant_roles = user.get_roles_for_tenant(requested_tenant)
+        role_group = user.role_group
+        if tenant_roles:
+            role_group = auth_service._determine_role_group(tenant_roles)
+        
+        return UserIdentity(
+            username=user.username,
+            tenant_id=requested_tenant,
+            roles=user.roles,
+            role_group=role_group,
+            email=user.email,
+            full_name=user.full_name,
+            raw_claims=user.raw_claims,
+            accessible_tenants=user.accessible_tenants,
+            tenant_roles=user.tenant_roles,
+        )
+    
+    return user
+
+
 def _store_in_request_state(request: Request, user: UserIdentity) -> None:
     """
     Store user identity in request state for middleware access.
@@ -219,3 +282,4 @@ def _store_in_request_state(request: Request, user: UserIdentity) -> None:
     request.state.username = user.username
     request.state.user_roles = user.roles
     request.state.role_group = user.role_group.value
+    request.state.user_identity = user

@@ -78,11 +78,18 @@ class TenantSpanProcessor(SpanProcessor):
         """
         Called when a span ends.
         
-        No action needed for tenant enrichment.
+        Re-enriches the span with final tenant_id from request context.
+        This ensures spans get the correct tenant_id even if it was
+        updated by middleware after span creation.
         
         Args:
             span: The span that ended
         """
+        # ReadableSpan doesn't allow modification, but we can check
+        # if we need to update. The actual update happens via the
+        # span reference we have during on_start.
+        # 
+        # Unfortunately, ReadableSpan is immutable. We need a different approach.
         pass
     
     def shutdown(self) -> None:

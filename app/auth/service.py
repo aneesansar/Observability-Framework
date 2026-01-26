@@ -99,36 +99,61 @@ class AuthService:
         """
         Extract UserIdentity from token claims.
         
+        Parses roles in format "TenantA:Admin,TenantB:User,User:john_doe":
+        - TenantA:Admin -> tenant_id=TenantA, role=Admin
+        - User:john_doe -> username=john_doe
+        
         Args:
             claims: Token claims dictionary
             
         Returns:
             UserIdentity object
         """
-        username = claims.get("preferred_username", "unknown")
-        tenant_id = claims.get("tenant_id") or username
         email = claims.get("email")
         full_name = claims.get("name")
         
-        # Extract roles
-        roles = self._extract_roles(claims)
-        role_group = self._determine_role_group(roles)
+        # Extract raw roles from claims
+        raw_roles = self._extract_roles(claims)
+        
+        # Parse roles to extract tenant_id, username, and tenant-specific roles
+        parsed = self._parse_tenant_roles(raw_roles)
+        
+        # Username: from User:xxx role, or preferred_username, or "unknown"
+        username = (
+            parsed["username"] 
+            or claims.get("preferred_username") 
+            or "unknown"
+        )
+        
+        # Tenant ID: from first tenant in roles, or explicit claim, or username
+        tenant_id = (
+            parsed["first_tenant"]
+            or claims.get("tenant_id")
+            or username
+        )
+        
+        # Determine role group from the role for current tenant
+        current_tenant_roles = parsed["tenant_roles"].get(tenant_id, [])
+        role_group = self._determine_role_group(current_tenant_roles or raw_roles)
         
         # Debug logging
         if auth_settings.role_debug:
             logger.info(
-                f"[ROLE_DEBUG] tenant={tenant_id} roles={roles} "
+                f"[ROLE_DEBUG] tenant={tenant_id} username={username} "
+                f"raw_roles={raw_roles} tenant_roles={parsed['tenant_roles']} "
                 f"role_group={role_group.value}"
             )
         
         return UserIdentity(
             username=username,
             tenant_id=tenant_id,
-            roles=roles,
+            roles=raw_roles,
             role_group=role_group,
             email=email,
             full_name=full_name,
             raw_claims=claims,
+            accessible_tenants=parsed["accessible_tenants"],
+            tenant_roles=parsed["tenant_roles"],
         )
     
     def _extract_roles(self, claims: Dict[str, Any]) -> List[str]:
@@ -156,6 +181,64 @@ class AuthService:
         
         # Deduplicate
         return list(set(roles))
+    
+    def _parse_tenant_roles(self, roles: List[str]) -> Dict[str, Any]:
+        """
+        Parse roles to extract tenant information.
+        
+        Expected format: "TenantA:Admin", "TenantB:User", "User:john_doe"
+        - TenantA:Admin -> tenant_id=TenantA, role=Admin
+        - User:john_doe -> username=john_doe
+        
+        Args:
+            roles: List of role strings
+            
+        Returns:
+            Dict with:
+            - username: Extracted username (from User:xxx)
+            - accessible_tenants: Set of tenant IDs user has access to
+            - tenant_roles: Dict mapping tenant_id to list of roles
+            - first_tenant: First tenant found (for default)
+        """
+        result = {
+            "username": None,
+            "accessible_tenants": set(),
+            "tenant_roles": {},
+            "first_tenant": None,
+        }
+        
+        for role in roles:
+            if ":" not in role:
+                continue
+            
+            parts = role.split(":", 1)
+            if len(parts) != 2:
+                continue
+            
+            key, value = parts[0].strip(), parts[1].strip()
+            
+            if not key or not value:
+                continue
+            
+            # Check if this is a username entry
+            if key.lower() == "user":
+                result["username"] = value
+            else:
+                # This is a tenant:role entry
+                tenant_id = key
+                tenant_role = value
+                
+                result["accessible_tenants"].add(tenant_id)
+                
+                if tenant_id not in result["tenant_roles"]:
+                    result["tenant_roles"][tenant_id] = []
+                result["tenant_roles"][tenant_id].append(tenant_role)
+                
+                # Track first tenant for default
+                if result["first_tenant"] is None:
+                    result["first_tenant"] = tenant_id
+        
+        return result
     
     def _determine_role_group(self, roles: List[str]) -> RoleGroup:
         """

@@ -57,6 +57,23 @@ class AuthSettings(BaseSettings):
         description="Enable role debugging output"
     )
     
+    # Tenant/Roles Headers
+    roles_header: str = Field(
+        default="X-User-Roles",
+        alias="ROLES_HEADER",
+        description="Header name for user roles (format: TenantA:Admin,TenantB:User,User:username)"
+    )
+    tenant_header: str = Field(
+        default="x-tenant-id",
+        alias="TENANT_HEADER",
+        description="Header name for explicit tenant ID override"
+    )
+    validate_tenant_access: bool = Field(
+        default=True,
+        alias="VALIDATE_TENANT_ACCESS",
+        description="Validate that user has access to requested tenant via roles"
+    )
+    
     # Role Mappings (stored as comma-separated strings, parsed on access)
     admin_roles_str: str = Field(
         default="admin,Admin",

@@ -24,6 +24,11 @@ class UserIdentity:
     Represents an authenticated user's identity.
     
     Contains all relevant information extracted from the authentication token.
+    
+    Supports role-based tenant extraction:
+    - Roles format: "TenantA:Admin,TenantB:User,User:john_doe"
+    - TenantA:Admin means user has Admin role in TenantA
+    - User:john_doe extracts the username
     """
     
     username: str
@@ -33,6 +38,8 @@ class UserIdentity:
     email: Optional[str] = None
     full_name: Optional[str] = None
     raw_claims: Dict[str, Any] = field(default_factory=dict)
+    accessible_tenants: set = field(default_factory=set)
+    tenant_roles: Dict[str, List[str]] = field(default_factory=dict)
     
     @property
     def is_admin(self) -> bool:
@@ -53,6 +60,14 @@ class UserIdentity:
         """Check if user has a specific role."""
         return role.lower() in [r.lower() for r in self.roles]
     
+    def has_access_to_tenant(self, tenant_id: str) -> bool:
+        """Check if user has access to a specific tenant."""
+        return tenant_id in self.accessible_tenants
+    
+    def get_roles_for_tenant(self, tenant_id: str) -> List[str]:
+        """Get roles for a specific tenant."""
+        return self.tenant_roles.get(tenant_id, [])
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -62,6 +77,8 @@ class UserIdentity:
             "role_group": self.role_group.value,
             "email": self.email,
             "full_name": self.full_name,
+            "accessible_tenants": list(self.accessible_tenants),
+            "tenant_roles": self.tenant_roles,
         }
     
     @classmethod
